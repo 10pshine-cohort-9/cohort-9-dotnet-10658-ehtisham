@@ -22,8 +22,11 @@ namespace TaskManager.Api.Controllers
             _logger = logger;
         }
 
-        private int CurrentUserId =>
-            int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        private bool TryGetCurrentUserId(out int userId)
+        {
+            var claim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            return int.TryParse(claim, out userId);
+        }
 
         private bool IsAdmin =>
             User.FindFirstValue(ClaimTypes.Role) == UserRole.Admin.ToString();
@@ -31,11 +34,14 @@ namespace TaskManager.Api.Controllers
         [HttpGet]
         public async Task<ActionResult<IEnumerable<TaskReadDto>>> GetTasks()
         {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Unauthorized();
+
             var query = _context.Tasks.AsQueryable();
 
             if (!IsAdmin)
             {
-                query = query.Where(t => t.UserId == CurrentUserId);
+                query = query.Where(t => t.UserId == currentUserId);
             }
 
             var tasks = await query
@@ -59,12 +65,15 @@ namespace TaskManager.Api.Controllers
         [HttpGet("{id}")]
         public async Task<ActionResult<TaskReadDto>> GetTask(int id)
         {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Unauthorized();
+
             var task = await _context.Tasks.FindAsync(id);
 
             if (task == null)
                 return NotFound();
 
-            if (!IsAdmin && task.UserId != CurrentUserId)
+            if (!IsAdmin && task.UserId != currentUserId)
                 return Forbid();
 
             return Ok(new TaskReadDto
@@ -84,6 +93,9 @@ namespace TaskManager.Api.Controllers
         [HttpPost]
         public async Task<ActionResult<TaskReadDto>> CreateTask(TaskCreateUpdateDto dto)
         {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Unauthorized();
+
             var task = new TaskItem
             {
                 Title = dto.Title,
@@ -92,26 +104,42 @@ namespace TaskManager.Api.Controllers
                 Priority = dto.Priority,
                 Category = dto.Category,
                 DueDate = dto.DueDate,
-                UserId = CurrentUserId
+                UserId = currentUserId
             };
 
             _context.Tasks.Add(task);
             await _context.SaveChangesAsync();
 
-            _logger.LogInformation("Task {TaskId} created by user {UserId}", task.Id, CurrentUserId);
+            _logger.LogInformation("Task {TaskId} created by user {UserId}", task.Id, currentUserId);
 
-            return CreatedAtAction(nameof(GetTask), new { id = task.Id }, task);
+            var readDto = new TaskReadDto
+            {
+                Id = task.Id,
+                Title = task.Title,
+                Description = task.Description,
+                Status = task.Status,
+                Priority = task.Priority,
+                Category = task.Category,
+                DueDate = task.DueDate,
+                CreatedAt = task.CreatedAt,
+                UserId = task.UserId
+            };
+
+            return CreatedAtAction(nameof(GetTask), new { id = task.Id }, readDto);
         }
 
         [HttpPut("{id}")]
         public async Task<IActionResult> UpdateTask(int id, TaskCreateUpdateDto dto)
         {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Unauthorized();
+
             var task = await _context.Tasks.FindAsync(id);
 
             if (task == null)
                 return NotFound();
 
-            if (!IsAdmin && task.UserId != CurrentUserId)
+            if (!IsAdmin && task.UserId != currentUserId)
                 return Forbid();
 
             task.Title = dto.Title;
@@ -120,11 +148,23 @@ namespace TaskManager.Api.Controllers
             task.Priority = dto.Priority;
             task.Category = dto.Category;
             task.DueDate = dto.DueDate;
+
+            if (IsAdmin && dto.UserId.HasValue)
+            {
+                var targetUserExists = await _context.Users.AnyAsync(u => u.Id == dto.UserId.Value);
+                if (!targetUserExists)
+                {
+                    return BadRequest($"User {dto.UserId.Value} does not exist.");
+                }
+
+                task.UserId = dto.UserId.Value;
+            }
+
             task.UpdatedAt = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();
 
-            _logger.LogInformation("Task {TaskId} updated by user {UserId}", task.Id, CurrentUserId);
+            _logger.LogInformation("Task {TaskId} updated by user {UserId}", task.Id, currentUserId);
 
             return NoContent();
         }
@@ -132,18 +172,21 @@ namespace TaskManager.Api.Controllers
         [HttpDelete("{id}")]
         public async Task<IActionResult> DeleteTask(int id)
         {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Unauthorized();
+
             var task = await _context.Tasks.FindAsync(id);
 
             if (task == null)
                 return NotFound();
 
-            if (!IsAdmin && task.UserId != CurrentUserId)
+            if (!IsAdmin && task.UserId != currentUserId)
                 return Forbid();
 
             _context.Tasks.Remove(task);
             await _context.SaveChangesAsync();
 
-            _logger.LogInformation("Task {TaskId} deleted by user {UserId}", task.Id, CurrentUserId);
+            _logger.LogInformation("Task {TaskId} deleted by user {UserId}", task.Id, currentUserId);
 
             return NoContent();
         }
@@ -151,10 +194,13 @@ namespace TaskManager.Api.Controllers
         [HttpGet("summary")]
         public async Task<ActionResult> GetSummary()
         {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Unauthorized();
+
             var query = _context.Tasks.AsQueryable();
 
             if (!IsAdmin)
-                query = query.Where(t => t.UserId == CurrentUserId);
+                query = query.Where(t => t.UserId == currentUserId);
 
             var summary = new
             {
